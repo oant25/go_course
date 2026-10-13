@@ -1,10 +1,8 @@
 package handler
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
-	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,63 +13,84 @@ import (
 	"github.com/oant25/go_course/internal/trip"
 )
 
-func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.CreateTripParams) {
-	var req api.TripData
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, r, problemInvalidRequest, "request body is not a valid trip: "+err.Error())
-		return
+const tripsPath = "/api/v1/trips"
+
+func (h *Handler) CreateTrip(ctx context.Context, req api.CreateTripRequestObject) (api.CreateTripResponseObject, error) {
+	body := req.Body
+	if body == nil {
+		return api.CreateTrip400ApplicationProblemPlusJSONResponse{
+			BadRequestApplicationProblemPlusJSONResponse: api.BadRequestApplicationProblemPlusJSONResponse(
+				newProblem(problemInvalidRequest, tripsPath, "request body is required")),
+		}, nil
 	}
-	if req.UserId == uuid.Nil || req.DriverId == uuid.Nil {
-		writeProblem(w, r, problemInvalidRequest, "user_id and driver_id must be non-empty UUIDs")
-		return
+	if body.UserId == uuid.Nil || body.DriverId == uuid.Nil {
+		return api.CreateTrip400ApplicationProblemPlusJSONResponse{
+			BadRequestApplicationProblemPlusJSONResponse: api.BadRequestApplicationProblemPlusJSONResponse(
+				newProblem(problemInvalidRequest, tripsPath, "user_id and driver_id must be non-empty UUIDs")),
+		}, nil
 	}
 
-	created, err := h.trips.Create(r.Context(), service.CreateInput{
-		UserID:   req.UserId,
-		DriverID: req.DriverId,
-		Start:    trip.Point{Latitude: req.StartPoint.Latitude, Longitude: req.StartPoint.Longitude},
-		End:      trip.Point{Latitude: req.EndPoint.Latitude, Longitude: req.EndPoint.Longitude},
-		Price:    req.Price,
+	created, err := h.trips.Create(ctx, service.CreateInput{
+		UserID:   body.UserId,
+		DriverID: body.DriverId,
+		Start:    trip.Point{Latitude: body.StartPoint.Latitude, Longitude: body.StartPoint.Longitude},
+		End:      trip.Point{Latitude: body.EndPoint.Latitude, Longitude: body.EndPoint.Longitude},
+		Price:    body.Price,
 	})
-	if err != nil {
-		writeDomainError(w, r, err)
-		return
+	switch {
+	case errors.Is(err, trip.ErrDriverBusy):
+		return api.CreateTrip409ApplicationProblemPlusJSONResponse{
+			CreateTripConflictApplicationProblemPlusJSONResponse: api.CreateTripConflictApplicationProblemPlusJSONResponse(
+				newProblem(problemDriverBusy, tripsPath, "Driver already has an active trip")),
+		}, nil
+	case err != nil:
+		return nil, err
 	}
 
-	w.Header().Set("Location", "/api/v1/trips/"+created.ID.String())
-	writeJSON(w, http.StatusCreated, toAPITrip(created))
+	location := tripPath(created.ID)
+	return api.CreateTrip201JSONResponse{
+		Body:    toAPITrip(created),
+		Headers: api.CreateTrip201ResponseHeaders{Location: &location},
+	}, nil
 }
 
-func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
-	t, err := h.trips.Get(r.Context(), tripID)
-	if err != nil {
-		writeDomainError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, toAPITrip(t))
-}
-
-func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
-	t, err := h.trips.Finish(r.Context(), tripID)
-	if err != nil {
-		writeDomainError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, toAPITrip(t))
-}
-
-func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
+func (h *Handler) GetTrip(ctx context.Context, req api.GetTripRequestObject) (api.GetTripResponseObject, error) {
+	t, err := h.trips.Get(ctx, req.TripId)
 	switch {
 	case errors.Is(err, trip.ErrNotFound):
-		writeProblem(w, r, problemTripNotFound, "Trip was not found")
-	case errors.Is(err, trip.ErrAlreadyCompleted):
-		writeProblem(w, r, problemTripCompleted, "Operation is not allowed for a completed trip")
-	case errors.Is(err, trip.ErrDriverBusy):
-		writeProblem(w, r, problemDriverBusy, "Driver already has an active trip")
-	default:
-		slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
-		writeProblem(w, r, problemInternal, "Internal server error")
+		return api.GetTrip404ApplicationProblemPlusJSONResponse{
+			TripNotFoundApplicationProblemPlusJSONResponse: api.TripNotFoundApplicationProblemPlusJSONResponse(
+				newProblem(problemTripNotFound, tripPath(req.TripId), "Trip was not found")),
+		}, nil
+	case err != nil:
+		return nil, err
 	}
+	return api.GetTrip200JSONResponse(toAPITrip(t)), nil
+}
+
+func (h *Handler) FinishTrip(ctx context.Context, req api.FinishTripRequestObject) (api.FinishTripResponseObject, error) {
+	instance := tripPath(req.TripId) + "/finish"
+
+	t, err := h.trips.Finish(ctx, req.TripId)
+	switch {
+	case errors.Is(err, trip.ErrNotFound):
+		return api.FinishTrip404ApplicationProblemPlusJSONResponse{
+			TripNotFoundApplicationProblemPlusJSONResponse: api.TripNotFoundApplicationProblemPlusJSONResponse(
+				newProblem(problemTripNotFound, instance, "Trip was not found")),
+		}, nil
+	case errors.Is(err, trip.ErrAlreadyCompleted):
+		return api.FinishTrip409ApplicationProblemPlusJSONResponse{
+			TripCompletedApplicationProblemPlusJSONResponse: api.TripCompletedApplicationProblemPlusJSONResponse(
+				newProblem(problemTripCompleted, instance, "Operation is not allowed for a completed trip")),
+		}, nil
+	case err != nil:
+		return nil, err
+	}
+	return api.FinishTrip200JSONResponse(toAPITrip(t)), nil
+}
+
+func tripPath(id uuid.UUID) string {
+	return tripsPath + "/" + id.String()
 }
 
 func toAPITrip(t trip.Trip) api.Trip {

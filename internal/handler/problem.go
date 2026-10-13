@@ -25,9 +25,8 @@ var (
 	problemInternal       = problem{http.StatusInternalServerError, "internal_error", "Internal Server Error", "internal-error"}
 )
 
-func writeProblem(w http.ResponseWriter, r *http.Request, p problem, detail string) {
-	instance := r.URL.Path
-	body := api.Problem{
+func newProblem(p problem, instance, detail string) api.Problem {
+	return api.Problem{
 		Type:     problemTypeBase + p.slug,
 		Title:    p.title,
 		Status:   int32(p.status),
@@ -35,18 +34,12 @@ func writeProblem(w http.ResponseWriter, r *http.Request, p problem, detail stri
 		Detail:   &detail,
 		Instance: &instance,
 	}
-
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(p.status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		slog.Error("write problem response", "error", err)
-	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		slog.Error("write response", "error", err)
+func writeProblem(w http.ResponseWriter, r *http.Request, p problem, detail string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(p.status)
+	if err := json.NewEncoder(w).Encode(newProblem(p, r.URL.Path, detail)); err != nil {
+		slog.Error("write problem response", "error", err)
 	}
 }

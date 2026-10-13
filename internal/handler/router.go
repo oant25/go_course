@@ -24,6 +24,7 @@ func NewRouter(h *Handler) (http.Handler, error) {
 
 	r := chi.NewRouter()
 	r.Use(recoverer)
+	r.Use(singleJSONBody)
 	r.Use(oapimw.OapiRequestValidatorWithOptions(spec, &oapimw.Options{
 		Options:              openapi3filter.Options{MultiError: false},
 		DoNotValidateServers: true,
@@ -37,7 +38,17 @@ func NewRouter(h *Handler) (http.Handler, error) {
 		},
 	}))
 
-	return api.HandlerWithOptions(h, api.ChiServerOptions{
+	strict := api.NewStrictHandlerWithOptions(h, nil, api.StrictHTTPServerOptions{
+		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			writeProblem(w, r, problemInvalidRequest, err.Error())
+		},
+		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+			writeProblem(w, r, problemInternal, "Internal server error")
+		},
+	})
+
+	return api.HandlerWithOptions(strict, api.ChiServerOptions{
 		BaseRouter: r,
 		ErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			writeProblem(w, r, problemInvalidRequest, err.Error())
