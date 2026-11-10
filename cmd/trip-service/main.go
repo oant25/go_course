@@ -5,21 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/oant25/go_course/internal/config"
-	"github.com/oant25/go_course/internal/handler"
-	"github.com/oant25/go_course/internal/postgres"
-	"github.com/oant25/go_course/internal/service"
+	"github.com/oant25/go_course/internal/container"
+	"github.com/oant25/go_course/internal/diagnostic"
+	"github.com/oant25/go_course/internal/infra/telemetry"
 )
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("service stopped with error", "error", err)
+		logger := telemetry.NewLogger(os.Stdout, os.Getenv("OTEL_SERVICE_NAME"), slog.LevelInfo)
+		message := "service stopped with error"
+		if errors.Is(err, context.DeadlineExceeded) {
+			message = "service deadline exceeded; forcing exit"
+		}
+		var configErr *config.Error
+		if errors.As(err, &configErr) {
+			logger.Error("invalid service configuration", "error", configErr.Error())
+		} else {
+			logger.LogAttrs(context.Background(), slog.LevelError, message, diagnostic.Attributes(err)...)
+		}
 		os.Exit(1)
 	}
 }
@@ -27,67 +35,13 @@ func main() {
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return fmt.Errorf("load configuration: %w", err)
 	}
-
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	pool, err := postgres.NewPool(ctx, cfg.DB)
+	app, err := container.New(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("connect to database: %w", err)
+		return fmt.Errorf("initialize service: %w", err)
 	}
-	defer pool.Close()
-	slog.Info("connected to database")
-
-	trips := service.NewTrips(postgres.NewTripRepo(pool, cfg.DB.QueryTimeout), postgres.NewTxManager(pool))
-	router, err := handler.NewRouter(handler.New(trips, pool, cfg.DB.QueryTimeout))
-	if err != nil {
-		return err
-	}
-
-	srv := &http.Server{
-		Addr:              cfg.HTTP.Addr,
-		Handler:           router,
-		ReadTimeout:       cfg.HTTP.ReadTimeout,
-		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
-		WriteTimeout:      cfg.HTTP.WriteTimeout,
-		IdleTimeout:       cfg.HTTP.IdleTimeout,
-	}
-
-	ln, err := net.Listen("tcp", cfg.HTTP.Addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", cfg.HTTP.Addr, err)
-	}
-	slog.Info("http server started", "addr", ln.Addr().String())
-
-	serverErr := make(chan error, 1)
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-		close(serverErr)
-	}()
-
-	select {
-	case err := <-serverErr:
-		return fmt.Errorf("http server: %w", err)
-	case <-ctx.Done():
-	}
-
-	stop()
-	slog.Info("shutting down", "timeout", cfg.ShutdownTimeout.String())
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		_ = srv.Close()
-		return fmt.Errorf("graceful shutdown: %w", err)
-	}
-
-	slog.Info("service stopped")
-	return nil
+	return app.Run(ctx)
 }

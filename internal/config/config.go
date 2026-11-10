@@ -11,6 +11,8 @@ import (
 )
 
 type Config struct {
+	Telemetry       Telemetry
+	ServiceName     string
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	HTTP            HTTP
@@ -18,11 +20,12 @@ type Config struct {
 }
 
 type HTTP struct {
-	Addr              string
-	ReadTimeout       time.Duration
-	ReadHeaderTimeout time.Duration
-	WriteTimeout      time.Duration
-	IdleTimeout       time.Duration
+	ResponseBufferBytes int
+	Addr                string
+	ReadTimeout         time.Duration
+	ReadHeaderTimeout   time.Duration
+	WriteTimeout        time.Duration
+	IdleTimeout         time.Duration
 }
 
 type DB struct {
@@ -38,14 +41,17 @@ func Load() (Config, error) {
 	var r reader
 
 	cfg := Config{
+		ServiceName:     r.string("OTEL_SERVICE_NAME"),
+		Telemetry:       r.telemetry(),
 		LogLevel:        r.logLevel("LOG_LEVEL"),
 		ShutdownTimeout: r.duration("SHUTDOWN_TIMEOUT"),
 		HTTP: HTTP{
-			Addr:              r.string("HTTP_ADDR"),
-			ReadTimeout:       r.duration("HTTP_READ_TIMEOUT"),
-			ReadHeaderTimeout: r.duration("HTTP_READ_HEADER_TIMEOUT"),
-			WriteTimeout:      r.duration("HTTP_WRITE_TIMEOUT"),
-			IdleTimeout:       r.duration("HTTP_IDLE_TIMEOUT"),
+			ResponseBufferBytes: int(r.int32("HTTP_RESPONSE_BUFFER_BYTES", 1024)),
+			Addr:                r.string("HTTP_ADDR"),
+			ReadTimeout:         r.duration("HTTP_READ_TIMEOUT"),
+			ReadHeaderTimeout:   r.duration("HTTP_READ_HEADER_TIMEOUT"),
+			WriteTimeout:        r.duration("HTTP_WRITE_TIMEOUT"),
+			IdleTimeout:         r.duration("HTTP_IDLE_TIMEOUT"),
 		},
 		DB: DB{
 			URL:             r.string("DATABASE_URL"),
@@ -62,7 +68,7 @@ func Load() (Config, error) {
 	}
 
 	if len(r.errs) > 0 {
-		return Config{}, fmt.Errorf("invalid config: %w", errors.Join(r.errs...))
+		return Config{}, &Error{cause: errors.Join(r.errs...)}
 	}
 	return cfg, nil
 }
@@ -131,3 +137,8 @@ func (r *reader) logLevel(name string) slog.Level {
 	}
 	return lvl
 }
+
+type Error struct{ cause error }
+
+func (e *Error) Error() string { return "invalid config: " + e.cause.Error() }
+func (e *Error) Unwrap() error { return e.cause }

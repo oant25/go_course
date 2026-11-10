@@ -6,3 +6,7 @@
 bin/
 
 .DS_Store
+
+# Local test reports
+.coverage/
+__pycache__/
